@@ -1,5 +1,0 @@
-python-binance
-ta
-pandas
-aiogram
-requests
