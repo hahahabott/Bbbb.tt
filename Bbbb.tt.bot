@@ -1,0 +1,111 @@
+import asyncio
+import logging
+from binance.client import Client
+from binance.enums import *
+from binance.exceptions import BinanceAPIException
+import ta
+import pandas as pd
+import requests
+from aiogram import Bot, Dispatcher, types, executor
+
+# ==== Binance API ====
+API_KEY = "rwgn9tWQhrPkeWYEUhmzWEVO0Yt1cMQnAQgGSfwc7y8RtyHlywbBCzMyoJJmqc6H"
+API_SECRET = "jnazgXkFe0nEHMZcHPyDJh2f2FMjni84nGX1wetO2ntoCGBIyBj83eGgTbUsizgN"
+client = Client(API_KEY, API_SECRET)
+client.futures_change_leverage(symbol='BTCUSDT', leverage=100)
+
+# ==== Telegram ====
+TELEGRAM_TOKEN = "7300093292:AAFn0XkEppHk9I__y5MN9Vvz4ZtBrPJbf9Y"
+CHAT_ID = -1002627783040  # Группа ID
+
+bot = Bot(token=TELEGRAM_TOKEN)
+dp = Dispatcher(bot)
+
+# ==== Статус ====
+running = True
+
+# ==== Сигнал функцияси ====
+def get_signal(symbol="BTCUSDT", interval="3m"):
+    bars = client.futures_klines(symbol=symbol, interval=interval, limit=100)
+    df = pd.DataFrame(bars, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_asset_volume', 'number_of_trades',
+        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+    ])
+    df['close'] = pd.to_numeric(df['close'])
+    
+    df['EMA7'] = ta.trend.ema_indicator(df['close'], window=7)
+    df['EMA25'] = ta.trend.ema_indicator(df['close'], window=25)
+    df['EMA99'] = ta.trend.ema_indicator(df['close'], window=99)
+    df['RSI'] = ta.momentum.rsi(df['close'], window=14)
+    macd = ta.trend.macd(df['close'])
+    df['MACD'] = macd.macd_diff()
+
+    last = df.iloc[-1]
+    if last['EMA7'] > last['EMA25'] > last['EMA99'] and last['RSI'] > 50 and last['MACD'] > 0:
+        return 'LONG'
+    elif last['EMA7'] < last['EMA25'] < last['EMA99'] and last['RSI'] < 50 and last['MACD'] < 0:
+        return 'SHORT'
+    else:
+        return 'NONE'
+
+# ==== Ордер функцияси ====
+def open_order(symbol, side, amount=7, leverage=100):
+    try:
+        client.futures_change_leverage(symbol=symbol, leverage=leverage)
+        mark_price = float(client.futures_mark_price(symbol=symbol)['markPrice'])
+        quantity = round((amount * leverage) / mark_price, 3)
+        order = client.futures_create_order(
+            symbol=symbol,
+            side=SIDE_BUY if side == 'LONG' else SIDE_SELL,
+            type=ORDER_TYPE_MARKET,
+            quantity=quantity
+        )
+        return order
+    except BinanceAPIException as e:
+        return str(e)
+
+# ==== Telegram хабари ====
+async def send_telegram(message):
+    await bot.send_message(chat_id=CHAT_ID, text=message)
+
+# ==== Авто цикл ====
+async def main_loop():
+    while True:
+        if running:
+            for symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]:
+                signal = get_signal(symbol)
+                if signal != 'NONE':
+                    order = open_order(symbol, signal)
+                    await send_telegram(f"{signal} сигнал: {symbol}\nОрдер: {order}")
+        await asyncio.sleep(60)
+
+# ==== Telegram буйруқлар ====
+@dp.message_handler(commands=['start'])
+async def start_bot(message: types.Message):
+    global running
+    running = True
+    await message.reply("Бот ишга тушди.")
+
+@dp.message_handler(commands=['stop'])
+async def stop_bot(message: types.Message):
+    global running
+    running = False
+    await message.reply("Бот тўхтатилди.")
+
+@dp.message_handler(commands=['status'])
+async def status_bot(message: types.Message):
+    status = "Ишлаяпти" if running else "Тўхтаган"
+    await message.reply(f"Бот ҳолати: {status}")
+
+@dp.message_handler(commands=['balance'])
+async def balance_bot(message: types.Message):
+    balance = client.futures_account_balance()
+    usdt = next(x for x in balance if x['asset'] == 'USDT')
+    await message.reply(f"Баланс: {usdt['balance']} USDT")
+
+# ==== Ишга тушириш ====
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.create_task(main_loop())
+    executor.start_polling(dp, skip_updates=True)
